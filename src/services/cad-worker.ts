@@ -6,11 +6,17 @@ import type {
   CadWorkerMessage,
   CadWorkerRequest,
   CadWorkerResultMessage,
-  CadWorkerProgressMessage
+  CadWorkerProgressStage,
+  CadWorkerBuildKind,
 } from './cad-worker-protocol';
-import type { Point2D } from '../domain/types';
+import type { GearInput, Point2D } from '../domain/types';
+import { generateGearProfile } from '../domain/involute';
 
 type ReplicadModule = typeof import('replicad');
+
+// STEP profile density (higher than 2D/3D preview — exports are written once and consumed by external CAD).
+const STEP_FLANK_POINTS = 32;
+const STEP_ROOT_POINTS = 8;
 
 let replicadPromise: Promise<ReplicadModule> | null = null;
 let ocInitPromise: Promise<OpenCascadeInstance> | null = null;
@@ -27,12 +33,12 @@ const ensureOpenCascade = async () => {
     ocInitPromise = (async () => {
       const [replicadModule, ocModule] = await Promise.all([
         loadReplicad(),
-        import('replicad-opencascadejs')
+        import('replicad-opencascadejs'),
       ]);
       const ocFactory = ocModule.default as unknown as (options?: {
         locateFile?: (path: string, scriptDir: string) => string;
       }) => Promise<OpenCascadeInstance>;
-      
+
       const oc = await ocFactory({
         locateFile: (path) => (path.endsWith('.wasm') ? replicadWasmUrl : path),
       });
@@ -55,15 +61,38 @@ const post = (message: CadWorkerMessage, transfer?: Transferable[]) => {
   ctx.postMessage(message, transfer ?? []);
 };
 
+const progress = (requestId: string, stage: CadWorkerProgressStage, done: number, total: number) => {
+  post({ type: 'progress', requestId, stage, done, total });
+};
+
 const postError = (requestId: string, error: unknown) => {
   const err = error instanceof Error ? error : new Error(String(error));
   const message: CadWorkerResultMessage = {
     type: 'result',
     requestId,
     ok: false,
-    payload: {message: err.message, stack: err.stack},
+    payload: { message: err.message, stack: err.stack },
   };
   post(message);
+};
+
+const buildShaftSolid = (diameter: number, length: number, keyway: boolean, replicad: any) => {
+  const makeCylinder = replicad.makeCylinder || replicad.default?.makeCylinder;
+  const makeBox = replicad.makeBox || replicad.default?.makeBox;
+  if (!makeCylinder || length <= 0 || diameter <= 0) return null;
+
+  let shaft = makeCylinder(diameter / 2, length).translate(0, 0, -length * 0.2);
+
+  if (keyway && makeBox && typeof shaft.cut === 'function') {
+    const kwWidth = Math.max(2, 0.25 * diameter);
+    const kwDepth = 0.12 * diameter;
+    const keyBox = makeBox(
+      [-kwWidth / 2, diameter / 2 - kwDepth, -length * 0.2],
+      [kwWidth / 2, diameter / 2 + 1, length * 0.8]
+    );
+    shaft = shaft.cut(keyBox);
+  }
+  return shaft;
 };
 
 const buildGearSolid = (
@@ -73,6 +102,8 @@ const buildGearSolid = (
   hubD: number,
   hubL: number,
   keyway: boolean,
+  chamferEdges: boolean,
+  moduleVal: number,
   replicad: any
 ) => {
   const draw = replicad.draw || replicad.default?.draw;
@@ -83,24 +114,28 @@ const buildGearSolid = (
     throw new Error('Replicad draw() function is not available.');
   }
 
-  // Create 2D teeth profile
-  let sketch = draw();
-  sketch.moveTo(points[0].x, points[0].y);
+  let sketch = draw([points[0].x, points[0].y]);
   for (let i = 1; i < points.length; i++) {
-    sketch.lineTo(points[i].x, points[i].y);
+    sketch = sketch.lineTo([points[i].x, points[i].y]);
   }
-  sketch.close();
+  sketch = sketch.close();
 
-  // Extrude to face width
   let solid = sketch.sketchOnPlane().extrude(faceWidth);
 
-  // Apply bore cutout
+  if (chamferEdges && typeof solid.chamfer === 'function') {
+    try {
+      const cDist = Math.min(1.0, moduleVal * 0.1);
+      solid = solid.chamfer(cDist);
+    } catch (e) {
+      console.warn('Chamfer operation failed or topology error, skipping chamfer.', e);
+    }
+  }
+
   if (bore > 0 && typeof makeCylinder === 'function') {
     const boreCylinder = makeCylinder(bore / 2, faceWidth);
     solid = solid.cut(boreCylinder);
   }
 
-  // Apply hub
   if (hubD > bore && hubL > 0 && typeof makeCylinder === 'function') {
     let hub = makeCylinder(hubD / 2, hubL).translate(0, 0, faceWidth);
     if (bore > 0) {
@@ -110,19 +145,140 @@ const buildGearSolid = (
     solid = solid.fuse(hub);
   }
 
-  // Apply keyway
   if (keyway && bore > 0 && typeof makeBox === 'function') {
     const shaftD = bore;
     const kwWidth = Math.max(2, 0.25 * shaftD);
-    const kwHeight = 0.62 * shaftD; // height from center
+    const kwHeight = 0.62 * shaftD;
     const totalLength = faceWidth + Math.max(0, hubL);
-    
-    // We position keyway cut centered on X, above center in Y
+
     const keyBox = makeBox([-kwWidth / 2, 0, 0], [kwWidth / 2, kwHeight, totalLength]);
     solid = solid.cut(keyBox);
   }
 
   return solid;
+};
+
+const compoundOrFuse = (a: any, b: any, replicad: any) => {
+  const makeCompound = (replicad as any).makeCompound || (replicad as any).default?.makeCompound;
+  if (typeof makeCompound === 'function') return makeCompound([a, b]);
+  return a.fuse(b);
+};
+
+// Build pinion (gear + shaft) at origin.
+const buildPinionGroup = (
+  gearInput: GearInput,
+  deltaY: number,
+  replicad: any,
+  requestId: string,
+  shareProgress: boolean
+) => {
+  if (shareProgress) progress(requestId, 'profile', 0, 1);
+  const pts = generateGearProfile(
+    gearInput.z1,
+    gearInput.module,
+    gearInput.pressureAngle,
+    gearInput.x1,
+    gearInput.addendumCoeff,
+    gearInput.dedendumCoeff,
+    deltaY,
+    STEP_FLANK_POINTS,
+    STEP_ROOT_POINTS
+  );
+  if (shareProgress) progress(requestId, 'profile', 1, 1);
+
+  if (shareProgress) progress(requestId, 'solid', 0, 1);
+  const gear = buildGearSolid(
+    pts,
+    gearInput.bore1,
+    gearInput.faceWidth,
+    gearInput.hubD1,
+    gearInput.hubL1,
+    gearInput.keyway1,
+    gearInput.chamferEdges,
+    gearInput.module,
+    replicad
+  );
+  const shaft = buildShaftSolid(gearInput.bore1, gearInput.shaftL1, gearInput.keyway1, replicad);
+  const group = shaft ? compoundOrFuse(gear, shaft, replicad) : gear;
+  if (shareProgress) progress(requestId, 'solid', 1, 1);
+  return group;
+};
+
+// Build gear (gear + shaft) at origin.
+const buildGearGroup = (
+  gearInput: GearInput,
+  deltaY: number,
+  replicad: any,
+  requestId: string,
+  shareProgress: boolean
+) => {
+  if (shareProgress) progress(requestId, 'profile', 0, 1);
+  const pts = generateGearProfile(
+    gearInput.z2,
+    gearInput.module,
+    gearInput.pressureAngle,
+    gearInput.x2,
+    gearInput.addendumCoeff,
+    gearInput.dedendumCoeff,
+    deltaY,
+    STEP_FLANK_POINTS,
+    STEP_ROOT_POINTS
+  );
+  if (shareProgress) progress(requestId, 'profile', 1, 1);
+
+  if (shareProgress) progress(requestId, 'solid', 0, 1);
+  const gear = buildGearSolid(
+    pts,
+    gearInput.bore2,
+    gearInput.faceWidth,
+    gearInput.hubD2,
+    gearInput.hubL2,
+    gearInput.keyway2,
+    gearInput.chamferEdges,
+    gearInput.module,
+    replicad
+  );
+  const shaft = buildShaftSolid(gearInput.bore2, gearInput.shaftL2, gearInput.keyway2, replicad);
+  const group = shaft ? compoundOrFuse(gear, shaft, replicad) : gear;
+  if (shareProgress) progress(requestId, 'solid', 1, 1);
+  return group;
+};
+
+const buildAssemblyGroup = (
+  gearInput: GearInput,
+  deltaY: number,
+  aw: number,
+  replicad: any,
+  requestId: string
+) => {
+  progress(requestId, 'profile', 0, 2);
+  const pinionGroup = buildPinionGroup(gearInput, deltaY, replicad, requestId, false);
+  progress(requestId, 'profile', 1, 2);
+  const gearGroup = buildGearGroup(gearInput, deltaY, replicad, requestId, false);
+  progress(requestId, 'profile', 2, 2);
+
+  progress(requestId, 'compound', 0, 1);
+  const gearBaseAngle = gearInput.z2 % 2 === 0 ? Math.PI + Math.PI / gearInput.z2 : Math.PI;
+  const positionedGear = gearGroup
+    .clone()
+    .rotate((gearBaseAngle * 180) / Math.PI)
+    .translate(aw, 0, 0);
+  const assembly = compoundOrFuse(pinionGroup, positionedGear, replicad);
+  progress(requestId, 'compound', 1, 1);
+  return assembly;
+};
+
+const buildByKind = (
+  kind: CadWorkerBuildKind,
+  gearInput: GearInput,
+  deltaY: number,
+  aw: number,
+  replicad: any,
+  requestId: string
+) => {
+  if (kind === 'pinion') return buildPinionGroup(gearInput, deltaY, replicad, requestId, true);
+  if (kind === 'gear') return buildGearGroup(gearInput, deltaY, replicad, requestId, true);
+  return buildAssemblyGroup(gearInput, deltaY, aw, replicad, requestId);
 };
 
 ctx.onmessage = async (event: MessageEvent<CadWorkerRequest>) => {
@@ -133,102 +289,44 @@ ctx.onmessage = async (event: MessageEvent<CadWorkerRequest>) => {
 
   try {
     if (request.type === 'warmup') {
-      post({type: 'progress', requestId, stage: 'init', done: 0, total: 1});
+      progress(requestId, 'init', 0, 1);
       await ensureOpenCascade();
-      post({type: 'progress', requestId, stage: 'init', done: 1, total: 1});
-      
-      const empty = new ArrayBuffer(0);
+      progress(requestId, 'init', 1, 1);
       post({
         type: 'result',
         requestId,
         ok: true,
-        payload: {pinionStep: empty, gearStep: empty, assemblyStep: empty}
+        payload: { step: new ArrayBuffer(0) },
       });
       return;
     }
 
-    if (request.type !== 'generate-step') {
+    if (request.type !== 'build') {
       throw new Error(`Unknown cad-worker request type: ${(request as any).type}`);
     }
 
-    post({type: 'progress', requestId, stage: 'init', done: 0, total: 1});
-    const oc = await ensureOpenCascade();
+    progress(requestId, 'init', 0, 1);
+    await ensureOpenCascade();
     const replicadModule = await loadReplicad();
-    post({type: 'progress', requestId, stage: 'init', done: 1, total: 1});
+    progress(requestId, 'init', 1, 1);
 
-    const { gearInput, pinionPoints, gearPoints, aw } = request;
+    const { kind, gearInput, deltaY, aw } = request;
+    const solid = buildByKind(kind, gearInput, deltaY, aw, replicadModule, requestId);
 
-    // 1. Generate Pinion
-    post({type: 'progress', requestId, stage: 'pinion', done: 0, total: 1});
-    const pinionSolid = buildGearSolid(
-      pinionPoints,
-      gearInput.bore1,
-      gearInput.faceWidth,
-      gearInput.hubD1,
-      gearInput.hubL1,
-      gearInput.keyway1,
-      replicadModule
+    progress(requestId, 'export', 0, 1);
+    const blob = solid.blobSTEP();
+    const buffer = await blob.arrayBuffer();
+    progress(requestId, 'export', 1, 1);
+
+    post(
+      {
+        type: 'result',
+        requestId,
+        ok: true,
+        payload: { step: buffer },
+      },
+      [buffer]
     );
-    post({type: 'progress', requestId, stage: 'pinion', done: 1, total: 1});
-
-    // 2. Generate Gear
-    post({type: 'progress', requestId, stage: 'gear', done: 0, total: 1});
-    const gearSolid = buildGearSolid(
-      gearPoints,
-      gearInput.bore2,
-      gearInput.faceWidth,
-      gearInput.hubD2,
-      gearInput.hubL2,
-      gearInput.keyway2,
-      replicadModule
-    );
-    post({type: 'progress', requestId, stage: 'gear', done: 1, total: 1});
-
-    // 3. Generate Assembly
-    post({type: 'progress', requestId, stage: 'assembly', done: 0, total: 1});
-    
-    // Position gear correctly for engaged assembly
-    const gearBaseAngle = gearInput.z2 % 2 === 0 ? Math.PI + Math.PI / gearInput.z2 : Math.PI;
-    const positionedGearSolid = gearSolid
-      .clone()
-      .rotate((gearBaseAngle * 180) / Math.PI)
-      .translate(aw, 0, 0);
-
-    const makeCompound = (replicadModule as any).makeCompound || (replicadModule as any).default?.makeCompound;
-    let assemblySolid = null;
-    if (typeof makeCompound === 'function') {
-      assemblySolid = makeCompound([pinionSolid, positionedGearSolid]);
-    } else {
-      assemblySolid = pinionSolid.fuse(positionedGearSolid);
-    }
-    post({type: 'progress', requestId, stage: 'assembly', done: 1, total: 1});
-
-    // 4. Export STEP buffers
-    post({type: 'progress', requestId, stage: 'export', done: 0, total: 3});
-    
-    const pBlob = pinionSolid.blobSTEP();
-    const pBuffer = await pBlob.arrayBuffer();
-    post({type: 'progress', requestId, stage: 'export', done: 1, total: 3});
-
-    const gBlob = gearSolid.blobSTEP();
-    const gBuffer = await gBlob.arrayBuffer();
-    post({type: 'progress', requestId, stage: 'export', done: 2, total: 3});
-
-    const aBlob = assemblySolid.blobSTEP();
-    const aBuffer = await aBlob.arrayBuffer();
-    post({type: 'progress', requestId, stage: 'export', done: 3, total: 3});
-
-    post({
-      type: 'result',
-      requestId,
-      ok: true,
-      payload: {
-        pinionStep: pBuffer,
-        gearStep: gBuffer,
-        assemblyStep: aBuffer
-      }
-    }, [pBuffer, gBuffer, aBuffer]);
-
   } catch (error) {
     postError(requestId, error);
   }

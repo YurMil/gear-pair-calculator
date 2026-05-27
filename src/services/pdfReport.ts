@@ -235,6 +235,11 @@ export function generatePdfReport(result: CalculationResult, includeLayoutDrawin
 
 import { generateGearProfile } from '../domain/involute';
 
+// Same density as the 2D/3D previews and DXF exports — keeps the inline
+// layout drawing visually identical to what the engineer reviews on screen.
+const PROFILE_FLANK_POINTS = 24;
+const PROFILE_ROOT_POINTS = 8;
+
 function drawGearLayout(doc: jsPDF, result: CalculationResult) {
   doc.addPage();
   doc.setFillColor(30, 41, 59);
@@ -259,14 +264,14 @@ function drawGearLayout(doc: jsPDF, result: CalculationResult) {
   const centerX2 = centerX1 + (aw * scale);
   
   const points1 = generateGearProfile(
-    geometry.pinion.z, geometry.pinion.m, gearInput.pressureAngle, 
-    gearInput.x1, gearInput.addendumCoeff, gearInput.dedendumCoeff, 
-    geometry.deltaY, 10, 4
+    geometry.pinion.z, geometry.pinion.m, gearInput.pressureAngle,
+    gearInput.x1, gearInput.addendumCoeff, gearInput.dedendumCoeff,
+    geometry.deltaY, PROFILE_FLANK_POINTS, PROFILE_ROOT_POINTS
   );
   const points2 = generateGearProfile(
-    geometry.gear.z, geometry.gear.m, gearInput.pressureAngle, 
-    gearInput.x2, gearInput.addendumCoeff, gearInput.dedendumCoeff, 
-    geometry.deltaY, 10, 4
+    geometry.gear.z, geometry.gear.m, gearInput.pressureAngle,
+    gearInput.x2, gearInput.addendumCoeff, gearInput.dedendumCoeff,
+    geometry.deltaY, PROFILE_FLANK_POINTS, PROFILE_ROOT_POINTS
   );
   
   doc.setDrawColor(15, 23, 42);
@@ -298,7 +303,7 @@ function drawGearLayout(doc: jsPDF, result: CalculationResult) {
 
   doc.setDrawColor(156, 163, 175);
   doc.setLineWidth(0.2);
-  doc.setLineDash([2, 2], 0);
+  (doc as any).setLineDash([2, 2], 0);
   doc.line(centerX1, centerY, centerX2, centerY);
   
   // Bores
@@ -309,7 +314,7 @@ function drawGearLayout(doc: jsPDF, result: CalculationResult) {
       doc.circle(centerX2, centerY, (gearInput.bore2/2) * scale);
   }
   
-  doc.setLineDash([], 0);
+  (doc as any).setLineDash([], 0);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
   doc.setTextColor(75, 85, 99);

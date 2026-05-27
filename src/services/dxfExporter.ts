@@ -1,6 +1,11 @@
 import { generateGearProfile, Point2D } from '../domain/involute';
 import type { CalculationResult } from '../domain/types';
 
+// Match the resolution used by 2D/3D previews so what the engineer sees on-screen
+// matches what their CAD package will import.
+const PROFILE_FLANK_POINTS = 24;
+const PROFILE_ROOT_POINTS = 8;
+
 const buildDxfHeader = () => {
   return [
     '0',
@@ -118,6 +123,60 @@ const buildDxfLwPolyline = (layer: string, points: Point2D[], closed: boolean = 
   return parts.join('\n');
 };
 
+// Closed periodic planar cubic SPLINE built from fit points.
+// AutoCAD, FreeCAD, BricsCAD and SolidWorks all interpolate the curve from these
+// fit points (control points + knot vector are computed by the receiver).
+// Flag bits: 1 = closed, 2 = periodic, 8 = planar → 11 for closed planar periodic.
+const buildDxfSplineFitPoints = (layer: string, points: Point2D[], closed: boolean = true) => {
+  // Defensive: if the caller passed a closed polyline that explicitly repeats the
+  // start as the last fit point, drop the duplicate. A zero-distance interval would
+  // make some CAD importers produce a degenerate knot vector or refuse the import.
+  let fitPoints = points;
+  if (closed && points.length > 1) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    if (Math.hypot(last.x - first.x, last.y - first.y) < 1e-5) {
+      fitPoints = points.slice(0, -1);
+    }
+  }
+
+  const flag = closed ? 11 : 8;
+  const parts: string[] = [
+    '0',
+    'SPLINE',
+    '8',
+    layer,
+    '100',
+    'AcDbEntity',
+    '100',
+    'AcDbSpline',
+    '70',
+    flag.toString(),
+    '71',
+    '3', // cubic degree
+    '72',
+    '0', // 0 knots provided — CAD computes them
+    '73',
+    '0', // 0 control points provided
+    '74',
+    fitPoints.length.toString(),
+    '42',
+    '0.0000001',
+    '43',
+    '0.0000001',
+    '44',
+    '0.0000000001',
+  ];
+
+  // Fit points use group codes 11/21/31.
+  for (const p of fitPoints) {
+    parts.push('11', p.x.toFixed(6), '21', p.y.toFixed(6), '31', '0.0');
+  }
+
+  parts.push('');
+  return parts.join('\n');
+};
+
 const buildDxfText = (layer: string, text: string, x: number, y: number, height: number = 3.5) => {
   return [
     '0',
@@ -177,13 +236,23 @@ export function exportSingleGearDxf(
   const rf = r - (hf_star - x) * m;
 
   // Generate high resolution profile points
-  const profilePoints = generateGearProfile(z, m, pressureAngle, x, ha_star, hf_star, deltaY, 20, 5);
+  const profilePoints = generateGearProfile(
+    z,
+    m,
+    pressureAngle,
+    x,
+    ha_star,
+    hf_star,
+    deltaY,
+    PROFILE_FLANK_POINTS,
+    PROFILE_ROOT_POINTS
+  );
 
   let dxf = buildDxfHeader();
   dxf += '\n0\nSECTION\n2\nENTITIES\n';
 
-  // 1. Profile Outline
-  dxf += buildDxfLwPolyline('GEAR_PROFILE', profilePoints, true);
+  // 1. Profile Outline — smooth SPLINE so downstream CAD treats the involute as a curve, not a polyline.
+  dxf += buildDxfSplineFitPoints('GEAR_PROFILE', profilePoints, true);
 
   // 2. Bore Hole
   if (bore > 0) {
@@ -224,8 +293,8 @@ export function exportGearPairLayoutDxf(result: CalculationResult): string {
     gearInput.addendumCoeff,
     gearInput.dedendumCoeff,
     geometry.deltaY,
-    20,
-    5
+    PROFILE_FLANK_POINTS,
+    PROFILE_ROOT_POINTS
   );
 
   const gearBaseAngle = gear.z % 2 === 0 ? Math.PI + Math.PI / gear.z : Math.PI;
@@ -238,8 +307,8 @@ export function exportGearPairLayoutDxf(result: CalculationResult): string {
     gearInput.addendumCoeff,
     gearInput.dedendumCoeff,
     geometry.deltaY,
-    20,
-    5
+    PROFILE_FLANK_POINTS,
+    PROFILE_ROOT_POINTS
   );
 
   // Rotate and translate gear points to position in mesh at (aw, 0)
@@ -255,9 +324,9 @@ export function exportGearPairLayoutDxf(result: CalculationResult): string {
   let dxf = buildDxfHeader();
   dxf += '\n0\nSECTION\n2\nENTITIES\n';
 
-  // 1. Profile Outlines
-  dxf += buildDxfLwPolyline('GEAR_PROFILE', pinionPoints, true);
-  dxf += buildDxfLwPolyline('GEAR_PROFILE', positionedGearPoints, true);
+  // 1. Profile Outlines — smooth SPLINEs.
+  dxf += buildDxfSplineFitPoints('GEAR_PROFILE', pinionPoints, true);
+  dxf += buildDxfSplineFitPoints('GEAR_PROFILE', positionedGearPoints, true);
 
   // 2. Bores
   if (gearInput.bore1 > 0) {
