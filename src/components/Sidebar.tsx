@@ -1,8 +1,57 @@
-import React, { useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Download, Search } from 'lucide-react';
 import { useGearStore } from '../state/gearStore';
 import { MATERIAL_PRESETS } from '../domain/gearPair';
 import type { CalculationResult, ValidationIssue } from '../domain/types';
+
+// Numeric input with local string buffer + commit-on-blur. Lets the user type
+// intermediate states like '-', '0.', '-0.5' without the store clamping back to 0.
+// Used for fields that accept negative values (profile shifts) where the standard
+// controlled-input pattern breaks the keyboard experience.
+interface SignedNumberInputProps {
+  value: number;
+  onCommit: (n: number) => void;
+  step?: string;
+  className?: string;
+}
+
+function SignedNumberInput({ value, onCommit, step = '0.01', className = 'form-input' }: SignedNumberInputProps) {
+  const [text, setText] = useState(() => String(value));
+  const [focused, setFocused] = useState(false);
+
+  // Sync from the outside when the field isn't being edited (e.g. applyCandidate
+  // resets x1/x2 to 0; we want the input to reflect that).
+  useEffect(() => {
+    if (!focused) setText(String(value));
+  }, [value, focused]);
+
+  const commit = () => {
+    setFocused(false);
+    const n = parseFloat(text);
+    if (Number.isFinite(n)) {
+      onCommit(n);
+      setText(String(n));
+    } else {
+      setText(String(value));
+    }
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      step={step}
+      className={className}
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onFocus={() => setFocused(true)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+      }}
+    />
+  );
+}
 
 type ExportDxfMode = 'pinion' | 'gear' | 'layout';
 type ExportStepKind = 'pinion' | 'gear' | 'assembly';
@@ -209,25 +258,13 @@ function GearParametersSection() {
             <label className="form-label">
               Pinion Shift <span className="label-symbol">x1</span>
             </label>
-            <input
-              type="number"
-              step="0.01"
-              className="form-input"
-              value={gearInput.x1}
-              onChange={(e) => setGearInput({ x1: parseFloat(e.target.value) || 0 })}
-            />
+            <SignedNumberInput value={gearInput.x1} onCommit={(n) => setGearInput({ x1: n })} />
           </div>
           <div className="form-group">
             <label className="form-label">
               Gear Shift <span className="label-symbol">x2</span>
             </label>
-            <input
-              type="number"
-              step="0.01"
-              className="form-input"
-              value={gearInput.x2}
-              onChange={(e) => setGearInput({ x2: parseFloat(e.target.value) || 0 })}
-            />
+            <SignedNumberInput value={gearInput.x2} onCommit={(n) => setGearInput({ x2: n })} />
           </div>
         </div>
 

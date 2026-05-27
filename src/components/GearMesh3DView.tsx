@@ -40,6 +40,9 @@ function createBorePath(bore: number, keyway: boolean): THREE.Path {
 }
 
 // Shaft cross-section as a closed THREE.Shape (with optional flat for the keyway).
+// For keyway: the cross-section is the round shaft MINUS a flat slot near the top.
+// Boundary goes along the flat then sweeps the long way (through the bottom) back to
+// the other end of the flat — hence the clockwise arc from theta1 → theta2.
 function createShaftShape(bore: number, keyway: boolean): THREE.Shape | null {
   if (bore <= 0) return null;
   const shape = new THREE.Shape();
@@ -52,7 +55,7 @@ function createShaftShape(bore: number, keyway: boolean): THREE.Shape | null {
     const theta2 = Math.atan2(yFlat, -halfW);
     shape.moveTo(-halfW, yFlat);
     shape.lineTo(halfW, yFlat);
-    shape.absarc(0, 0, R, theta1, theta2, false);
+    shape.absarc(0, 0, R, theta1, theta2, true);
   } else {
     shape.absarc(0, 0, R, 0, Math.PI * 2, false);
   }

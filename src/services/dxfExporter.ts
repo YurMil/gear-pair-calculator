@@ -128,6 +128,18 @@ const buildDxfLwPolyline = (layer: string, points: Point2D[], closed: boolean = 
 // fit points (control points + knot vector are computed by the receiver).
 // Flag bits: 1 = closed, 2 = periodic, 8 = planar → 11 for closed planar periodic.
 const buildDxfSplineFitPoints = (layer: string, points: Point2D[], closed: boolean = true) => {
+  // Defensive: if the caller passed a closed polyline that explicitly repeats the
+  // start as the last fit point, drop the duplicate. A zero-distance interval would
+  // make some CAD importers produce a degenerate knot vector or refuse the import.
+  let fitPoints = points;
+  if (closed && points.length > 1) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    if (Math.hypot(last.x - first.x, last.y - first.y) < 1e-5) {
+      fitPoints = points.slice(0, -1);
+    }
+  }
+
   const flag = closed ? 11 : 8;
   const parts: string[] = [
     '0',
@@ -147,7 +159,7 @@ const buildDxfSplineFitPoints = (layer: string, points: Point2D[], closed: boole
     '73',
     '0', // 0 control points provided
     '74',
-    points.length.toString(),
+    fitPoints.length.toString(),
     '42',
     '0.0000001',
     '43',
@@ -157,7 +169,7 @@ const buildDxfSplineFitPoints = (layer: string, points: Point2D[], closed: boole
   ];
 
   // Fit points use group codes 11/21/31.
-  for (const p of points) {
+  for (const p of fitPoints) {
     parts.push('11', p.x.toFixed(6), '21', p.y.toFixed(6), '31', '0.0');
   }
 
