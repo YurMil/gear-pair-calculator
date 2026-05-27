@@ -125,16 +125,25 @@ export default function App() {
             percent = 15;
           } else if (msg.stage === 'profile') {
             stage = 'Generating tooth profile...';
-            percent = 30;
+            percent = 25;
           } else if (msg.stage === 'solid') {
-            stage = kind === 'assembly' ? 'Modeling both solids...' : `Modeling ${kind} solid...`;
-            percent = 60;
+            if (kind === 'assembly' && msg.total > 1) {
+              // msg.done indexes which sub-solid is *starting* (0 = pinion, 1 = gear, 2 = both finished).
+              const phase = msg.done === 0 ? 'pinion' : msg.done === 1 ? 'gear' : null;
+              stage = phase
+                ? `Modeling ${phase} solid (${msg.done + 1}/${msg.total})...`
+                : 'Both solids modeled';
+              percent = 30 + 50 * (msg.done / msg.total);
+            } else {
+              stage = `Modeling ${kind} solid...`;
+              percent = 60;
+            }
           } else if (msg.stage === 'compound') {
             stage = 'Engaging gear meshes...';
-            percent = 80;
+            percent = 85;
           } else if (msg.stage === 'export') {
             stage = 'Writing STEP file...';
-            percent = 92;
+            percent = 95;
           }
           setCadProgress({ stage, percent });
         },
