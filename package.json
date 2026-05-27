@@ -1,0 +1,38 @@
+{
+  "name": "@cadautoscript/gear-pair-calculator-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/rename-html.mjs && node scripts/write-manifest.mjs && node scripts/copy-to-static.mjs",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "zustand": "^5.0.9",
+    "jspdf": "^4.2.1",
+    "lucide-react": "^0.561.0",
+    "replicad": "^0.20.5",
+    "replicad-opencascadejs": "^0.20.2",
+    "@react-three/fiber": "^9.5.0",
+    "@react-three/drei": "^10.7.7",
+    "three": "^0.182.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.13",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.182.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "typescript": "~5.6.2",
+    "vite": "^6.2.0",
+    "vitest": "^3.0.0"
+  }
+}
