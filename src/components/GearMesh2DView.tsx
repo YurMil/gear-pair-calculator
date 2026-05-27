@@ -73,9 +73,9 @@ export function GearMesh2DView({ result, isAnimating, animationSpeed }: GearMesh
       lastTime = time;
 
       if (isAnimating) {
-        // RPM to degrees per second: rpm * 360 / 60 = rpm * 6
-        const speedDegPerSec = loadInput.speed1 * 6;
-        localPinionAngle += speedDegPerSec * deltaSec * animationSpeed;
+        // Use a fixed base speed for preview so it doesn't spin wildly based on actual physical RPM
+        const baseSpeedDegPerSec = 180; // Half a rotation per second
+        localPinionAngle += baseSpeedDegPerSec * deltaSec * animationSpeed;
         localPinionAngle %= 360;
       }
 

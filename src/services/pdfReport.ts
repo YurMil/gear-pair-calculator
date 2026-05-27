@@ -33,12 +33,12 @@ export function generatePdfReport(result: CalculationResult, includeLayoutDrawin
     doc.setFontSize(9);
     doc.setTextColor(75, 85, 99);
     doc.text(label1, 14, y);
-    doc.text(label2, 110, y);
+    doc.text(label2, 115, y);
     
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(17, 24, 39);
-    doc.text(val1 || '-', 45, y);
-    doc.text(val2 || '-', 145, y);
+    doc.text(val1 || '-', 65, y);
+    doc.text(val2 || '-', 160, y);
     y += 6;
   };
 

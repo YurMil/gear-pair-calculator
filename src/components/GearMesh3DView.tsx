@@ -107,9 +107,9 @@ function GearScene({ result, isAnimating, animationSpeed }: GearMesh3DViewProps)
   useFrame((state, delta) => {
     if (!isAnimating) return;
 
-    // speed in degrees per sec
-    const speedDegPerSec = loadInput.speed1 * 6;
-    const deltaAngleDeg = speedDegPerSec * delta * animationSpeed;
+    // Use a fixed base speed for preview so it doesn't spin wildly based on actual physical RPM
+    const baseSpeedDegPerSec = 180; // Half a rotation per second
+    const deltaAngleDeg = baseSpeedDegPerSec * delta * animationSpeed;
     const deltaAngleRad = (deltaAngleDeg * Math.PI) / 180;
 
     if (pinionMeshRef.current) {

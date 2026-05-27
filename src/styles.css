@@ -247,6 +247,7 @@ body {
 
 .form-input {
   width: 100%;
+  min-width: 0;
   background: rgba(0, 0, 0, 0.3);
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -278,6 +279,7 @@ body {
 
 .form-select {
   width: 100%;
+  min-width: 0;
   background: rgba(0, 0, 0, 0.3);
   border: 1px solid var(--border-color);
   border-radius: 6px;
@@ -629,3 +631,46 @@ body {
   outline: 1px solid rgba(244, 63, 94, 0.5) !important;
   border-color: var(--accent-rose) !important;
 }
+
+/* Mobile & Responsive Layout Adjustments */
+@media (max-width: 900px) {
+  .app-workspace {
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  
+  .sidebar-panel {
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+    flex: none;
+    overflow: visible;
+  }
+  
+  .main-view {
+    display: flex;
+    flex-direction: column;
+    min-height: auto;
+    overflow: visible;
+  }
+  
+  .visualization-workspace {
+    min-height: 400px;
+    flex: none;
+  }
+  
+  .bottom-results-panel {
+    border-top: 1px solid var(--border-color);
+    overflow: visible;
+    flex: none;
+  }
+  
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+  
+  .results-content {
+    overflow: visible;
+  }
+}
+
