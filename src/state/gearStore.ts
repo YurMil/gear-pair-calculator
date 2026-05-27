@@ -4,52 +4,59 @@ import type {
   LoadInput,
   MaterialInput,
   ProjectMetadata,
-  CalculationResult,
   CandidateProposal,
-  SearchOptions
+  SearchOptions,
 } from '../domain/types';
 import {
-  calculateSpurGearPair,
   DEFAULT_GEAR_INPUT,
   DEFAULT_LOAD_INPUT,
-  DEFAULT_MATERIAL_INPUT
+  DEFAULT_MATERIAL_INPUT,
 } from '../domain/gearPair';
 import { searchCandidates } from '../domain/ratioSearch';
+
+export type DesignMode = 'check' | 'ratio';
+export type VisualMode = '2d' | '3d';
+export type ActiveTab = 'dimensions' | 'forces' | 'strength' | 'ratioSearch' | 'validation';
 
 export interface GearStore {
   metadata: ProjectMetadata;
   gearInput: GearInput;
   loadInput: LoadInput;
   materialInput: MaterialInput;
-  
-  // UI states
-  visualMode: '2d' | '3d';
-  activeTab: 'dimensions' | 'forces' | 'strength' | 'ratioSearch' | 'validation';
+
+  // UI state
+  designMode: DesignMode;
+  visualMode: VisualMode;
+  activeTab: ActiveTab;
   isAnimating: boolean;
-  animationSpeed: number; // 0.1 to 2.0
-  rotationAngle: number; // current angle for animation
-  
+  animationSpeed: number;
+
   // Ratio search
   searchOptions: SearchOptions;
   searchResults: CandidateProposal[];
-  
+
   // Actions
   setMetadata: (meta: Partial<ProjectMetadata>) => void;
   setGearInput: (input: Partial<GearInput>) => void;
   setLoadInput: (input: Partial<LoadInput>) => void;
   setMaterialInput: (input: Partial<MaterialInput>) => void;
-  setVisualMode: (mode: '2d' | '3d') => void;
-  setActiveTab: (tab: 'dimensions' | 'forces' | 'strength' | 'ratioSearch' | 'validation') => void;
+
+  setDesignMode: (mode: DesignMode) => void;
+  setVisualMode: (mode: VisualMode) => void;
+  setActiveTab: (tab: ActiveTab) => void;
   setIsAnimating: (anim: boolean) => void;
   setAnimationSpeed: (speed: number) => void;
-  updateRotationAngle: (delta: number) => void;
-  
+
   setSearchOptions: (opts: Partial<SearchOptions>) => void;
   runRatioSearch: () => void;
   applyCandidate: (candidate: CandidateProposal) => void;
-  
-  // Derived selector
-  getCalculatedResult: () => CalculationResult;
+
+  importSession: (session: {
+    metadata: ProjectMetadata;
+    gearInput: GearInput;
+    loadInput: LoadInput;
+    materialInput: MaterialInput;
+  }) => void;
 }
 
 export const useGearStore = create<GearStore>((set, get) => ({
@@ -63,13 +70,13 @@ export const useGearStore = create<GearStore>((set, get) => ({
   gearInput: DEFAULT_GEAR_INPUT,
   loadInput: DEFAULT_LOAD_INPUT,
   materialInput: DEFAULT_MATERIAL_INPUT,
-  
+
+  designMode: 'check',
   visualMode: '2d',
   activeTab: 'dimensions',
   isAnimating: true,
-  animationSpeed: 0.05, // low speed by default
-  rotationAngle: 0,
-  
+  animationSpeed: 0.05,
+
   searchOptions: {
     ratioTarget: 2.0,
     centerDistanceTarget: 60,
@@ -85,46 +92,37 @@ export const useGearStore = create<GearStore>((set, get) => ({
   setGearInput: (input) => set((state) => ({ gearInput: { ...state.gearInput, ...input } })),
   setLoadInput: (input) => set((state) => ({ loadInput: { ...state.loadInput, ...input } })),
   setMaterialInput: (input) => set((state) => ({ materialInput: { ...state.materialInput, ...input } })),
+
+  setDesignMode: (mode) => set({ designMode: mode }),
   setVisualMode: (mode) => set({ visualMode: mode }),
   setActiveTab: (tab) => set({ activeTab: tab }),
   setIsAnimating: (anim) => set({ isAnimating: anim }),
   setAnimationSpeed: (speed) => set({ animationSpeed: speed }),
-  updateRotationAngle: (delta) => set((state) => {
-    const input = state.gearInput;
-    const load = state.loadInput;
-    // Pinion speed in RPM -> degrees per second:
-    // rpm * 360 / 60 = rpm * 6
-    // delta is in seconds
-    const speedDegPerSec = load.speed1 * 6; 
-    const angleDelta = state.isAnimating ? (speedDegPerSec * delta * state.animationSpeed) : 0;
-    return { rotationAngle: (state.rotationAngle + angleDelta) % 360 };
-  }),
-  
+
   setSearchOptions: (opts) => set((state) => ({ searchOptions: { ...state.searchOptions, ...opts } })),
   runRatioSearch: () => {
     const opts = get().searchOptions;
-    const results = searchCandidates(opts);
-    set({ searchResults: results });
+    set({ searchResults: searchCandidates(opts) });
   },
-  applyCandidate: (candidate) => set((state) => ({
-    gearInput: {
-      ...state.gearInput,
-      z1: candidate.z1,
-      z2: candidate.z2,
-      module: candidate.module,
-      x1: 0, // Reset profile shifts to standard initially
-      x2: 0,
-    },
-    activeTab: 'dimensions', // Go back to results screen
-  })),
-  
-  getCalculatedResult: () => {
-    const state = get();
-    return calculateSpurGearPair(
-      state.metadata,
-      state.gearInput,
-      state.loadInput,
-      state.materialInput
-    );
-  }
+  applyCandidate: (candidate) =>
+    set((state) => ({
+      gearInput: {
+        ...state.gearInput,
+        z1: candidate.z1,
+        z2: candidate.z2,
+        module: candidate.module,
+        x1: 0,
+        x2: 0,
+      },
+      designMode: 'check',
+      activeTab: 'dimensions',
+    })),
+
+  importSession: (session) =>
+    set((state) => ({
+      metadata: { ...state.metadata, ...session.metadata },
+      gearInput: { ...state.gearInput, ...session.gearInput },
+      loadInput: { ...state.loadInput, ...session.loadInput },
+      materialInput: { ...state.materialInput, ...session.materialInput },
+    })),
 }));

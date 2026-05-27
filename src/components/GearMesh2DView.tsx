@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { generateGearProfile, Point2D } from '../domain/involute';
 import type { CalculationResult } from '../domain/types';
 
@@ -8,33 +8,51 @@ interface GearMesh2DViewProps {
   animationSpeed: number;
 }
 
+const FLANK_POINTS = 24;
+const ROOT_POINTS = 8;
+
+// Convert Point2D array to SVG path data string (closed)
+function getPathData(points: Point2D[]): string {
+  if (points.length === 0) return '';
+  return 'M ' + points.map((p) => `${p.x.toFixed(4)},${p.y.toFixed(4)}`).join(' L ') + ' Z';
+}
+
 export function GearMesh2DView({ result, isAnimating, animationSpeed }: GearMesh2DViewProps) {
-  const { geometry, gearInput, loadInput } = result;
+  const { geometry, gearInput } = result;
   const { pinion, gear, aw, ratio } = geometry;
 
+  const svgRef = useRef<SVGSVGElement>(null);
   const pinionRef = useRef<SVGGElement>(null);
   const gearRef = useRef<SVGGElement>(null);
-  
-  // Transform state for pan/zoom
+
+  // Transform state for pan/zoom (applied to inner <g>)
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1.0);
   const [isDragging, setIsDragging] = useState(false);
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const dragOriginRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
-  // View parameters
+  // Reference circle toggles
   const [showPitchCircles, setShowPitchCircles] = useState(true);
   const [showBaseCircles, setShowBaseCircles] = useState(false);
   const [showOutsideCircles, setShowOutsideCircles] = useState(false);
   const [showRootCircles, setShowRootCircles] = useState(false);
   const [showLineOfAction, setShowLineOfAction] = useState(true);
 
-  // Generate 2D tooth profiles
-  const [pinionPoints, setPinionPoints] = useState<Point2D[]>([]);
-  const [gearPoints, setGearPoints] = useState<Point2D[]>([]);
-
-  useEffect(() => {
-    // Generate points with a reasonable resolution
-    const pPts = generateGearProfile(
+  // Profiles: pure derived state — useMemo, not useState+useEffect.
+  const pinionPoints = useMemo(
+    () =>
+      generateGearProfile(
+        pinion.z,
+        pinion.m,
+        gearInput.pressureAngle,
+        gearInput.x1,
+        gearInput.addendumCoeff,
+        gearInput.dedendumCoeff,
+        geometry.deltaY,
+        FLANK_POINTS,
+        ROOT_POINTS
+      ),
+    [
       pinion.z,
       pinion.m,
       gearInput.pressureAngle,
@@ -42,10 +60,23 @@ export function GearMesh2DView({ result, isAnimating, animationSpeed }: GearMesh
       gearInput.addendumCoeff,
       gearInput.dedendumCoeff,
       geometry.deltaY,
-      12, // flank resolution
-      4   // root resolution
-    );
-    const gPts = generateGearProfile(
+    ]
+  );
+
+  const gearPoints = useMemo(
+    () =>
+      generateGearProfile(
+        gear.z,
+        gear.m,
+        gearInput.pressureAngle,
+        gearInput.x2,
+        gearInput.addendumCoeff,
+        gearInput.dedendumCoeff,
+        geometry.deltaY,
+        FLANK_POINTS,
+        ROOT_POINTS
+      ),
+    [
       gear.z,
       gear.m,
       gearInput.pressureAngle,
@@ -53,42 +84,93 @@ export function GearMesh2DView({ result, isAnimating, animationSpeed }: GearMesh
       gearInput.addendumCoeff,
       gearInput.dedendumCoeff,
       geometry.deltaY,
-      12,
-      4
-    );
-    setPinionPoints(pPts);
-    setGearPoints(gPts);
-  }, [pinion.z, pinion.m, gear.z, gear.m, gearInput.x1, gearInput.x2, gearInput.pressureAngle, geometry.deltaY]);
+    ]
+  );
 
-  // Animation loop
+  const pinionPath = useMemo(() => getPathData(pinionPoints), [pinionPoints]);
+  const gearPath = useMemo(() => getPathData(gearPoints), [gearPoints]);
+
+  // Auto-fit viewBox to the assembly bounds with margin.
+  const viewBox = useMemo(() => {
+    const xMin = -pinion.da / 2;
+    const xMax = aw + gear.da / 2;
+    const yExt = Math.max(pinion.da, gear.da) / 2;
+    const span = xMax - xMin;
+    const margin = Math.max(5, span * 0.08);
+    const w = span + 2 * margin;
+    const h = 2 * yExt + 2 * margin;
+    return `${xMin - margin} ${-yExt - margin} ${w} ${h}`;
+  }, [pinion.da, gear.da, aw]);
+
+  // Active line-of-action segment (between intersections with outside circles).
+  // This is the portion where the teeth actually engage — a useful overlay for collision inspection.
+  const actionLine = useMemo(() => {
+    const alpha = (gearInput.pressureAngle * Math.PI) / 180;
+    const rb1 = pinion.db / 2;
+    const rb2 = gear.db / 2;
+    const ra1 = pinion.da / 2;
+    const ra2 = gear.da / 2;
+
+    // Full tangent line: from (rb1*sin a, rb1*cos a) to (aw - rb2*sin a, -rb2*cos a).
+    const Tx1 = rb1 * Math.sin(alpha);
+    const Ty1 = rb1 * Math.cos(alpha);
+    const Tx2 = aw - rb2 * Math.sin(alpha);
+    const Ty2 = -rb2 * Math.cos(alpha);
+
+    // Active arc bounds: where the line intersects the addendum circles.
+    // Param: point on line of action parameterized along the tangent.
+    // For pinion: intersection at radius ra1 from origin.
+    // For gear: intersection at radius ra2 from (aw, 0).
+    const lenAB = Math.hypot(Tx2 - Tx1, Ty2 - Ty1);
+    let activeStart = { x: Tx1, y: Ty1 };
+    let activeEnd = { x: Tx2, y: Ty2 };
+    const term1 = ra1 * ra1 - rb1 * rb1;
+    const term2 = ra2 * ra2 - rb2 * rb2;
+    if (term1 > 0 && term2 > 0 && lenAB > 0) {
+      const d1 = Math.sqrt(term1); // distance from base-tangent point along line for pinion outside
+      const d2 = Math.sqrt(term2);
+      const ux = (Tx2 - Tx1) / lenAB;
+      const uy = (Ty2 - Ty1) / lenAB;
+      // active start: from pinion side, distance d1 along the line toward the gear
+      activeStart = { x: Tx1 + ux * d1, y: Ty1 + uy * d1 };
+      // active end: from gear side, distance d2 backward
+      activeEnd = { x: Tx2 - ux * d2, y: Ty2 - uy * d2 };
+    }
+
+    return { Tx1, Ty1, Tx2, Ty2, activeStart, activeEnd };
+  }, [pinion.db, pinion.da, gear.db, gear.da, aw, gearInput.pressureAngle]);
+
+  // Animation loop. Note: rAF always runs, but DOM is only updated when angle changes.
   useEffect(() => {
     let animationId: number;
     let lastTime = performance.now();
     let localPinionAngle = 0;
 
+    // Half-pitch offset so a pinion tooth lines up with a gear gap.
     const gearBaseAngle = gear.z % 2 === 0 ? Math.PI + Math.PI / gear.z : Math.PI;
+    const gearBaseAngleDeg = (gearBaseAngle * 180) / Math.PI;
+
+    // Initialize gear angle so the engaged frame is correct even when paused.
+    if (gearRef.current) {
+      gearRef.current.setAttribute('transform', `translate(${aw}, 0) rotate(${gearBaseAngleDeg})`);
+    }
 
     const animate = (time: number) => {
       const deltaSec = (time - lastTime) / 1000;
       lastTime = time;
 
       if (isAnimating) {
-        // Use a fixed base speed for preview so it doesn't spin wildly based on actual physical RPM
-        const baseSpeedDegPerSec = 180; // Half a rotation per second
+        const baseSpeedDegPerSec = 180;
         localPinionAngle += baseSpeedDegPerSec * deltaSec * animationSpeed;
         localPinionAngle %= 360;
-      }
 
-      // Update DOM nodes directly to bypass React re-renders for smooth 60fps
-      if (pinionRef.current) {
-        pinionRef.current.setAttribute('transform', `rotate(${localPinionAngle})`);
-      }
-      
-      if (gearRef.current) {
-        const pinionAngleRad = (localPinionAngle * Math.PI) / 180;
-        const gearAngleRad = gearBaseAngle - pinionAngleRad / ratio;
-        const gearAngleDeg = (gearAngleRad * 180) / Math.PI;
-        gearRef.current.setAttribute('transform', `translate(${aw}, 0) rotate(${gearAngleDeg})`);
+        if (pinionRef.current) {
+          pinionRef.current.setAttribute('transform', `rotate(${localPinionAngle})`);
+        }
+        if (gearRef.current) {
+          const gearAngleDeg = gearBaseAngleDeg - localPinionAngle / ratio;
+          gearRef.current.setAttribute('transform', `translate(${aw}, 0) rotate(${gearAngleDeg})`);
+        }
       }
 
       animationId = requestAnimationFrame(animate);
@@ -96,40 +178,58 @@ export function GearMesh2DView({ result, isAnimating, animationSpeed }: GearMesh
 
     animationId = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(animationId);
-  }, [isAnimating, animationSpeed, loadInput.speed1, ratio, aw, gear.z]);
+  }, [isAnimating, animationSpeed, ratio, aw, gear.z]);
 
-  // Convert Point2D array to SVG path data string
-  const getPathData = (points: Point2D[]) => {
-    if (points.length === 0) return '';
-    return 'M ' + points.map((p) => `${p.x.toFixed(3)},${p.y.toFixed(3)}`).join(' L ') + ' Z';
+  // --- Pan / Zoom ----------------------------------------------------------
+
+  // Convert client coords to SVG user-space coords (the viewBox space).
+  const clientToSvg = (clientX: number, clientY: number) => {
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const pt = svg.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return { x: 0, y: 0 };
+    const inv = ctm.inverse();
+    const sp = pt.matrixTransform(inv);
+    return { x: sp.x, y: sp.y };
   };
 
-  // Pan and zoom event handlers
   const handleMouseDown = (e: React.MouseEvent) => {
     setIsDragging(true);
-    setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+    const sp = clientToSvg(e.clientX, e.clientY);
+    dragOriginRef.current = { x: sp.x, y: sp.y, panX: pan.x, panY: pan.y };
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!isDragging) return;
+    const sp = clientToSvg(e.clientX, e.clientY);
     setPan({
-      x: e.clientX - dragStart.x,
-      y: e.clientY - dragStart.y,
+      x: dragOriginRef.current.panX + (sp.x - dragOriginRef.current.x),
+      y: dragOriginRef.current.panY + (sp.y - dragOriginRef.current.y),
     });
   };
 
-  const handleMouseUp = () => {
-    setIsDragging(false);
-  };
+  const handleMouseUp = () => setIsDragging(false);
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
-    const zoomFactor = 1.1;
-    if (e.deltaY < 0) {
-      setZoom((z) => Math.min(z * zoomFactor, 10));
-    } else {
-      setZoom((z) => Math.max(z / zoomFactor, 0.2));
-    }
+    const sp = clientToSvg(e.clientX, e.clientY);
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const newZoom = Math.max(0.2, Math.min(zoom * factor, 50));
+    if (newZoom === zoom) return;
+
+    // Keep the world point under the cursor stationary.
+    // Inner <g> transform: screen_sp = world * zoom + pan
+    // → world = (sp - pan) / zoom; newPan = sp - world * newZoom
+    const worldX = (sp.x - pan.x) / zoom;
+    const worldY = (sp.y - pan.y) / zoom;
+    setPan({
+      x: sp.x - worldX * newZoom,
+      y: sp.y - worldY * newZoom,
+    });
+    setZoom(newZoom);
   };
 
   const resetView = () => {
@@ -137,15 +237,16 @@ export function GearMesh2DView({ result, isAnimating, animationSpeed }: GearMesh
     setZoom(1.0);
   };
 
-  // Center line of action calculations
-  const pressureAngleRad = (gearInput.pressureAngle * Math.PI) / 180;
-  // Start and end of line of action tangent to base circles
-  const rb1 = pinion.db / 2;
-  const rb2 = gear.db / 2;
-  const lineOfActionX1 = rb1 * Math.sin(pressureAngleRad);
-  const lineOfActionY1 = rb1 * Math.cos(pressureAngleRad);
-  const lineOfActionX2 = aw - rb2 * Math.sin(pressureAngleRad);
-  const lineOfActionY2 = -rb2 * Math.cos(pressureAngleRad);
+  // --- Render --------------------------------------------------------------
+
+  // Grid step adapts to assembly size so the background never overwhelms the drawing.
+  const gridStep = useMemo(() => {
+    const span = pinion.da / 2 + gear.da / 2 + aw;
+    if (span < 30) return 2;
+    if (span < 100) return 5;
+    if (span < 300) return 10;
+    return 20;
+  }, [pinion.da, gear.da, aw]);
 
   return (
     <div className="viewer-container">
@@ -172,11 +273,14 @@ export function GearMesh2DView({ result, isAnimating, animationSpeed }: GearMesh
             <input type="checkbox" checked={showLineOfAction} onChange={(e) => setShowLineOfAction(e.target.checked)} />
             Action Line
           </label>
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+            {(zoom * 100).toFixed(0)}%
+          </span>
           <button className="btn btn-secondary btn-sm" onClick={resetView}>Reset View</button>
         </div>
       </div>
 
-      <div 
+      <div
         className="svg-wrapper"
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
@@ -186,96 +290,152 @@ export function GearMesh2DView({ result, isAnimating, animationSpeed }: GearMesh
         style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
       >
         <svg
+          ref={svgRef}
           width="100%"
           height="100%"
-          viewBox="-120 -100 350 200"
-          style={{ overflow: 'hidden' }}
+          viewBox={viewBox}
+          preserveAspectRatio="xMidYMid meet"
+          style={{ overflow: 'hidden', display: 'block' }}
         >
+          <defs>
+            <pattern id="grid" width={gridStep} height={gridStep} patternUnits="userSpaceOnUse">
+              <path
+                d={`M ${gridStep} 0 L 0 0 0 ${gridStep}`}
+                fill="none"
+                stroke="rgba(255,255,255,0.04)"
+                strokeWidth="1"
+                vectorEffect="non-scaling-stroke"
+              />
+            </pattern>
+          </defs>
+
           <g transform={`translate(${pan.x}, ${pan.y}) scale(${zoom})`}>
-            {/* Grid background */}
-            <defs>
-              <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
-                <path d="M 20 0 L 0 0 0 20" fill="none" stroke="rgba(255,255,255,0.03)" strokeWidth="1" />
-              </pattern>
-            </defs>
-            <rect x="-500" y="-500" width="1000" height="1000" fill="url(#grid)" pointerEvents="none" />
+            {/* Grid background — sized large enough to fill at extreme pans */}
+            <rect
+              x={-10000}
+              y={-10000}
+              width={20000}
+              height={20000}
+              fill="url(#grid)"
+              pointerEvents="none"
+            />
 
-            {/* X-axis line of centers */}
-            <line x1="-50" y1="0" x2={aw + 50} y2="0" stroke="rgba(255,255,255,0.15)" strokeWidth="0.5" strokeDasharray="5,5" />
-            
-            {/* Pinion Center Mark */}
-            <line x1="-5" y1="0" x2="5" y2="0" stroke="rgba(255,255,255,0.3)" strokeWidth="0.75" />
-            <line x1="0" y1="-5" x2="0" y2="5" stroke="rgba(255,255,255,0.3)" strokeWidth="0.75" />
+            {/* Centerline */}
+            <line
+              x1={-pinion.da}
+              y1={0}
+              x2={aw + gear.da}
+              y2={0}
+              stroke="rgba(255,255,255,0.18)"
+              strokeWidth="1"
+              strokeDasharray="6,4"
+              vectorEffect="non-scaling-stroke"
+            />
 
-            {/* Gear Center Mark */}
-            <line x1={aw - 5} y1="0" x2={aw + 5} y2="0" stroke="rgba(255,255,255,0.3)" strokeWidth="0.75" />
-            <line x1={aw} y1="-5" x2={aw} y2="5" stroke="rgba(255,255,255,0.3)" strokeWidth="0.75" />
+            {/* Pinion center mark */}
+            <g stroke="rgba(255,255,255,0.4)" strokeWidth="1" vectorEffect="non-scaling-stroke">
+              <line x1={-pinion.da * 0.04} y1={0} x2={pinion.da * 0.04} y2={0} />
+              <line x1={0} y1={-pinion.da * 0.04} x2={0} y2={pinion.da * 0.04} />
+            </g>
 
-            {/* Reference Circles (Static) */}
+            {/* Gear center mark */}
+            <g
+              stroke="rgba(255,255,255,0.4)"
+              strokeWidth="1"
+              vectorEffect="non-scaling-stroke"
+              transform={`translate(${aw}, 0)`}
+            >
+              <line x1={-gear.da * 0.04} y1={0} x2={gear.da * 0.04} y2={0} />
+              <line x1={0} y1={-gear.da * 0.04} x2={0} y2={gear.da * 0.04} />
+            </g>
+
+            {/* Reference circles */}
             {showPitchCircles && (
               <>
-                {/* Pinion pitch diameter circle */}
-                <circle cx="0" cy="0" r={pinion.d / 2} fill="none" stroke="#22d3ee" strokeWidth="0.75" strokeDasharray="3,3" />
-                {/* Gear pitch diameter circle */}
-                <circle cx={aw} cy="0" r={gear.d / 2} fill="none" stroke="#e879f9" strokeWidth="0.75" strokeDasharray="3,3" />
-                {/* Operating pitch circles */}
-                <circle cx="0" cy="0" r={(2 * aw * pinion.z) / (pinion.z + gear.z) / 2} fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="0.5" />
-                <circle cx={aw} cy="0" r={(2 * aw * gear.z) / (pinion.z + gear.z) / 2} fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="0.5" />
+                <circle cx={0} cy={0} r={pinion.d / 2} fill="none" stroke="#22d3ee" strokeWidth="1" strokeDasharray="4,3" vectorEffect="non-scaling-stroke" />
+                <circle cx={aw} cy={0} r={gear.d / 2} fill="none" stroke="#e879f9" strokeWidth="1" strokeDasharray="4,3" vectorEffect="non-scaling-stroke" />
+                {/* Operating pitch circles (computed from aw) */}
+                <circle cx={0} cy={0} r={(aw * pinion.z) / (pinion.z + gear.z)} fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth="0.6" vectorEffect="non-scaling-stroke" />
+                <circle cx={aw} cy={0} r={(aw * gear.z) / (pinion.z + gear.z)} fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth="0.6" vectorEffect="non-scaling-stroke" />
               </>
             )}
 
             {showBaseCircles && (
               <>
-                <circle cx="0" cy="0" r={pinion.db / 2} fill="none" stroke="#f43f5e" strokeWidth="0.5" strokeDasharray="2,4" />
-                <circle cx={aw} cy="0" r={gear.db / 2} fill="none" stroke="#f43f5e" strokeWidth="0.5" strokeDasharray="2,4" />
+                <circle cx={0} cy={0} r={pinion.db / 2} fill="none" stroke="#f43f5e" strokeWidth="0.8" strokeDasharray="2,4" vectorEffect="non-scaling-stroke" />
+                <circle cx={aw} cy={0} r={gear.db / 2} fill="none" stroke="#f43f5e" strokeWidth="0.8" strokeDasharray="2,4" vectorEffect="non-scaling-stroke" />
               </>
             )}
 
             {showOutsideCircles && (
               <>
-                <circle cx="0" cy="0" r={pinion.da / 2} fill="none" stroke="#a855f7" strokeWidth="0.5" strokeDasharray="2,2" />
-                <circle cx={aw} cy="0" r={gear.da / 2} fill="none" stroke="#a855f7" strokeWidth="0.5" strokeDasharray="2,2" />
+                <circle cx={0} cy={0} r={pinion.da / 2} fill="none" stroke="#a855f7" strokeWidth="0.8" strokeDasharray="2,2" vectorEffect="non-scaling-stroke" />
+                <circle cx={aw} cy={0} r={gear.da / 2} fill="none" stroke="#a855f7" strokeWidth="0.8" strokeDasharray="2,2" vectorEffect="non-scaling-stroke" />
               </>
             )}
 
             {showRootCircles && (
               <>
-                <circle cx="0" cy="0" r={pinion.df / 2} fill="none" stroke="#10b981" strokeWidth="0.5" strokeDasharray="1,3" />
-                <circle cx={aw} cy="0" r={gear.df / 2} fill="none" stroke="#10b981" strokeWidth="0.5" strokeDasharray="1,3" />
+                <circle cx={0} cy={0} r={pinion.df / 2} fill="none" stroke="#10b981" strokeWidth="0.8" strokeDasharray="1,3" vectorEffect="non-scaling-stroke" />
+                <circle cx={aw} cy={0} r={gear.df / 2} fill="none" stroke="#10b981" strokeWidth="0.8" strokeDasharray="1,3" vectorEffect="non-scaling-stroke" />
               </>
             )}
 
-            {/* Line of action tangent to base circles */}
+            {/* Line of action — full tangent (dim) + active engaged segment (bright) */}
             {showLineOfAction && (
               <>
-                <line x1={lineOfActionX1} y1={lineOfActionY1} x2={lineOfActionX2} y2={lineOfActionY2} stroke="#fbbf24" strokeWidth="0.75" strokeDasharray="4,2" />
-                <circle cx={lineOfActionX1} cy={lineOfActionY1} r="1.5" fill="#fbbf24" />
-                <circle cx={lineOfActionX2} cy={lineOfActionY2} r="1.5" fill="#fbbf24" />
+                <line
+                  x1={actionLine.Tx1}
+                  y1={actionLine.Ty1}
+                  x2={actionLine.Tx2}
+                  y2={actionLine.Ty2}
+                  stroke="rgba(251,191,36,0.35)"
+                  strokeWidth="0.8"
+                  strokeDasharray="3,3"
+                  vectorEffect="non-scaling-stroke"
+                />
+                <line
+                  x1={actionLine.activeStart.x}
+                  y1={actionLine.activeStart.y}
+                  x2={actionLine.activeEnd.x}
+                  y2={actionLine.activeEnd.y}
+                  stroke="#fbbf24"
+                  strokeWidth="1.2"
+                  vectorEffect="non-scaling-stroke"
+                />
+                <circle cx={actionLine.activeStart.x} cy={actionLine.activeStart.y} r={1.5} fill="#fbbf24" vectorEffect="non-scaling-stroke" />
+                <circle cx={actionLine.activeEnd.x} cy={actionLine.activeEnd.y} r={1.5} fill="#fbbf24" vectorEffect="non-scaling-stroke" />
               </>
             )}
 
-            {/* Pinion path group */}
-            <g id="pinion-group" ref={pinionRef}>
+            {/* Pinion (rotated by animation) */}
+            <g ref={pinionRef}>
               <path
-                d={getPathData(pinionPoints)}
-                fill="rgba(34, 211, 238, 0.15)"
+                d={pinionPath}
+                fill="rgba(34, 211, 238, 0.12)"
                 stroke="#22d3ee"
                 strokeWidth="1.25"
+                strokeLinejoin="round"
+                vectorEffect="non-scaling-stroke"
               />
-              {/* Draw bore */}
-              <circle cx="0" cy="0" r={gearInput.bore1 / 2} fill="#111" stroke="#22d3ee" strokeWidth="0.75" />
+              {gearInput.bore1 > 0 && (
+                <circle cx={0} cy={0} r={gearInput.bore1 / 2} fill="#0b0c10" stroke="#22d3ee" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+              )}
             </g>
 
-            {/* Gear path group */}
-            <g id="gear-group" ref={gearRef}>
+            {/* Gear (translated + rotated by animation) */}
+            <g ref={gearRef}>
               <path
-                d={getPathData(gearPoints)}
-                fill="rgba(232, 121, 249, 0.15)"
+                d={gearPath}
+                fill="rgba(232, 121, 249, 0.12)"
                 stroke="#e879f9"
                 strokeWidth="1.25"
+                strokeLinejoin="round"
+                vectorEffect="non-scaling-stroke"
               />
-              {/* Draw bore */}
-              <circle cx="0" cy="0" r={gearInput.bore2 / 2} fill="#111" stroke="#e879f9" strokeWidth="0.75" />
+              {gearInput.bore2 > 0 && (
+                <circle cx={0} cy={0} r={gearInput.bore2 / 2} fill="#0b0c10" stroke="#e879f9" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+              )}
             </g>
           </g>
         </svg>

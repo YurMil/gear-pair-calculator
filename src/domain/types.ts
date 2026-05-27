@@ -28,6 +28,9 @@ export interface GearInput {
   hubL2: number; // hub length gear
   keyway1: boolean; // has keyway pinion
   keyway2: boolean; // has keyway gear
+  shaftL1: number; // shaft length pinion
+  shaftL2: number; // shaft length gear
+  chamferEdges: boolean; // apply edge chamfers to gear teeth
 }
 
 export interface LoadInput {

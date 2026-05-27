@@ -102,7 +102,6 @@ export function calculateSpurGeometry(
 
   // 4. Operating pressure angle
   const alphaWRad = solveAlphaW(alpha, x1, x2, z1, z2);
-  const alphaW = (alphaWRad * 185.0) / Math.PI; // convert to degrees approximately for debug, let's use exact conversion:
   const alphaWDeg = (alphaWRad * 180) / Math.PI;
 
   // 5. Operating center distance

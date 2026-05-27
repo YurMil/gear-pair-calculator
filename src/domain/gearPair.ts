@@ -61,10 +61,13 @@ export const DEFAULT_GEAR_INPUT: GearInput = {
   bore2: 25,
   hubD1: 25,
   hubD2: 40,
-  hubL1: 0,
-  hubL2: 0,
+  hubL1: 10,
+  hubL2: 10,
   keyway1: false,
-  keyway2: false
+  keyway2: false,
+  shaftL1: 50,
+  shaftL2: 50,
+  chamferEdges: true
 };
 
 export const DEFAULT_LOAD_INPUT: LoadInput = {
