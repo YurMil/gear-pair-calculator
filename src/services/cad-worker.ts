@@ -125,7 +125,18 @@ const buildGearSolid = (
   if (chamferEdges && typeof solid.chamfer === 'function') {
     try {
       const cDist = Math.min(1.0, moduleVal * 0.1);
-      solid = solid.chamfer(cDist);
+      // Restrict the chamfer to the top and bottom face outlines only.
+      // Without a filter, OpenCascade processes every edge — including the
+      // ~N vertical seams between adjacent flank strips — which dominates
+      // STEP build time for high-density profiles. The face-outline edges
+      // are what an engineer actually wants chamfered anyway (deburr at
+      // the gear faces, not at every tooth-flank intersection).
+      solid = solid.chamfer(cDist, (e: any) =>
+        e.either([
+          (f: any) => f.inPlane('XY', 0),
+          (f: any) => f.inPlane('XY', faceWidth),
+        ])
+      );
     } catch (e) {
       console.warn('Chamfer operation failed or topology error, skipping chamfer.', e);
     }
@@ -251,11 +262,13 @@ const buildAssemblyGroup = (
   replicad: any,
   requestId: string
 ) => {
-  progress(requestId, 'profile', 0, 2);
+  // Report progress around each heavy solid build. `done` indexes which gear we're on,
+  // so the client can display "pinion 1/2" then "gear 2/2".
+  progress(requestId, 'solid', 0, 2);
   const pinionGroup = buildPinionGroup(gearInput, deltaY, replicad, requestId, false);
-  progress(requestId, 'profile', 1, 2);
+  progress(requestId, 'solid', 1, 2);
   const gearGroup = buildGearGroup(gearInput, deltaY, replicad, requestId, false);
-  progress(requestId, 'profile', 2, 2);
+  progress(requestId, 'solid', 2, 2);
 
   progress(requestId, 'compound', 0, 1);
   const gearBaseAngle = gearInput.z2 % 2 === 0 ? Math.PI + Math.PI / gearInput.z2 : Math.PI;
