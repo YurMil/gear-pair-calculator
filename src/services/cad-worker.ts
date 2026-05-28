@@ -106,21 +106,50 @@ const buildGearSolid = (
   moduleVal: number,
   replicad: any
 ) => {
+  const drawPointsInterpolation =
+    replicad.drawPointsInterpolation || replicad.default?.drawPointsInterpolation;
   const draw = replicad.draw || replicad.default?.draw;
   const makeCylinder = replicad.makeCylinder || replicad.default?.makeCylinder;
   const makeBox = replicad.makeBox || replicad.default?.makeBox;
 
-  if (typeof draw !== 'function') {
-    throw new Error('Replicad draw() function is not available.');
+  // Sketch the tooth profile as a smooth interpolated B-spline rather than a
+  // polyline of ~N straight segments. CAD downstream sees one continuous curve
+  // per closed loop, the extruded sides become smooth surfaces, and the chamfer
+  // operates on a single outline edge instead of N edge segments.
+  //
+  // The interpolation can throw on extreme geometries (e.g. low z + large
+  // negative x where the fit points develop a cusp or self-intersection). On
+  // failure we degrade gracefully to the original polyline path so the export
+  // always succeeds rather than aborting with an OCCT error.
+  const buildPolylineDrawing = () => {
+    if (typeof draw !== 'function') {
+      throw new Error('Replicad drawing API is not available.');
+    }
+    let s = draw([points[0].x, points[0].y]);
+    for (let i = 1; i < points.length; i++) {
+      s = s.lineTo([points[i].x, points[i].y]);
+    }
+    return s.close();
+  };
+
+  let drawing: any;
+  if (typeof drawPointsInterpolation === 'function') {
+    try {
+      const fitPoints: Array<[number, number]> = points.map((p) => [p.x, p.y]);
+      drawing = drawPointsInterpolation(
+        fitPoints,
+        { degMax: 3, degMin: 3 },
+        { closeShape: true }
+      );
+    } catch (e) {
+      console.warn('B-spline interpolation failed, falling back to polyline:', e);
+      drawing = buildPolylineDrawing();
+    }
+  } else {
+    drawing = buildPolylineDrawing();
   }
 
-  let sketch = draw([points[0].x, points[0].y]);
-  for (let i = 1; i < points.length; i++) {
-    sketch = sketch.lineTo([points[i].x, points[i].y]);
-  }
-  sketch = sketch.close();
-
-  let solid = sketch.sketchOnPlane().extrude(faceWidth);
+  let solid = drawing.sketchOnPlane().extrude(faceWidth);
 
   if (chamferEdges && typeof solid.chamfer === 'function') {
     try {
@@ -169,10 +198,30 @@ const buildGearSolid = (
   return solid;
 };
 
-const compoundOrFuse = (a: any, b: any, replicad: any) => {
+// For assemblies — two distinct rigid bodies in one STEP container.
+const compoundParts = (a: any, b: any, replicad: any) => {
   const makeCompound = (replicad as any).makeCompound || (replicad as any).default?.makeCompound;
   if (typeof makeCompound === 'function') return makeCompound([a, b]);
   return a.fuse(b);
+};
+
+// For individual parts — boolean-union into a single continuous solid body.
+// Single body is what a manufacturer / downstream CAD expects: no overlapping
+// shells, no z-fighting between the shaft cylinder and the bore hole, mass
+// properties and surfaces unify cleanly.
+//
+// OCCT boolean union is sensitive to coincident faces — the shaft's outer
+// cylinder and the gear's bore cylinder share the same radius by construction.
+// In ~95% of configurations OCCT handles this fine, but on some topologies it
+// throws. Fall back to compounding so we still produce a usable STEP rather
+// than aborting the whole export.
+const fuseToSingleBody = (a: any, b: any, replicad: any) => {
+  try {
+    return a.fuse(b);
+  } catch (e) {
+    console.warn('Boolean fuse failed, falling back to compound:', e);
+    return compoundParts(a, b, replicad);
+  }
 };
 
 // Build pinion (gear + shaft) at origin.
@@ -210,7 +259,7 @@ const buildPinionGroup = (
     replicad
   );
   const shaft = buildShaftSolid(gearInput.bore1, gearInput.shaftL1, gearInput.keyway1, replicad);
-  const group = shaft ? compoundOrFuse(gear, shaft, replicad) : gear;
+  const group = shaft ? fuseToSingleBody(gear, shaft, replicad) : gear;
   if (shareProgress) progress(requestId, 'solid', 1, 1);
   return group;
 };
@@ -250,7 +299,7 @@ const buildGearGroup = (
     replicad
   );
   const shaft = buildShaftSolid(gearInput.bore2, gearInput.shaftL2, gearInput.keyway2, replicad);
-  const group = shaft ? compoundOrFuse(gear, shaft, replicad) : gear;
+  const group = shaft ? fuseToSingleBody(gear, shaft, replicad) : gear;
   if (shareProgress) progress(requestId, 'solid', 1, 1);
   return group;
 };
@@ -276,7 +325,7 @@ const buildAssemblyGroup = (
     .clone()
     .rotate((gearBaseAngle * 180) / Math.PI)
     .translate(aw, 0, 0);
-  const assembly = compoundOrFuse(pinionGroup, positionedGear, replicad);
+  const assembly = compoundParts(pinionGroup, positionedGear, replicad);
   progress(requestId, 'compound', 1, 1);
   return assembly;
 };
