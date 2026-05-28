@@ -116,23 +116,37 @@ const buildGearSolid = (
   // polyline of ~N straight segments. CAD downstream sees one continuous curve
   // per closed loop, the extruded sides become smooth surfaces, and the chamfer
   // operates on a single outline edge instead of N edge segments.
-  let drawing: any;
-  if (typeof drawPointsInterpolation === 'function') {
-    const fitPoints: Array<[number, number]> = points.map((p) => [p.x, p.y]);
-    drawing = drawPointsInterpolation(
-      fitPoints,
-      { degMax: 3, degMin: 3 },
-      { closeShape: true }
-    );
-  } else if (typeof draw === 'function') {
-    // Fallback if the interpolation helper isn't exposed in this build of replicad.
+  //
+  // The interpolation can throw on extreme geometries (e.g. low z + large
+  // negative x where the fit points develop a cusp or self-intersection). On
+  // failure we degrade gracefully to the original polyline path so the export
+  // always succeeds rather than aborting with an OCCT error.
+  const buildPolylineDrawing = () => {
+    if (typeof draw !== 'function') {
+      throw new Error('Replicad drawing API is not available.');
+    }
     let s = draw([points[0].x, points[0].y]);
     for (let i = 1; i < points.length; i++) {
       s = s.lineTo([points[i].x, points[i].y]);
     }
-    drawing = s.close();
+    return s.close();
+  };
+
+  let drawing: any;
+  if (typeof drawPointsInterpolation === 'function') {
+    try {
+      const fitPoints: Array<[number, number]> = points.map((p) => [p.x, p.y]);
+      drawing = drawPointsInterpolation(
+        fitPoints,
+        { degMax: 3, degMin: 3 },
+        { closeShape: true }
+      );
+    } catch (e) {
+      console.warn('B-spline interpolation failed, falling back to polyline:', e);
+      drawing = buildPolylineDrawing();
+    }
   } else {
-    throw new Error('Replicad drawing API is not available.');
+    drawing = buildPolylineDrawing();
   }
 
   let solid = drawing.sketchOnPlane().extrude(faceWidth);
@@ -195,7 +209,20 @@ const compoundParts = (a: any, b: any, replicad: any) => {
 // Single body is what a manufacturer / downstream CAD expects: no overlapping
 // shells, no z-fighting between the shaft cylinder and the bore hole, mass
 // properties and surfaces unify cleanly.
-const fuseToSingleBody = (a: any, b: any) => a.fuse(b);
+//
+// OCCT boolean union is sensitive to coincident faces — the shaft's outer
+// cylinder and the gear's bore cylinder share the same radius by construction.
+// In ~95% of configurations OCCT handles this fine, but on some topologies it
+// throws. Fall back to compounding so we still produce a usable STEP rather
+// than aborting the whole export.
+const fuseToSingleBody = (a: any, b: any, replicad: any) => {
+  try {
+    return a.fuse(b);
+  } catch (e) {
+    console.warn('Boolean fuse failed, falling back to compound:', e);
+    return compoundParts(a, b, replicad);
+  }
+};
 
 // Build pinion (gear + shaft) at origin.
 const buildPinionGroup = (
@@ -232,7 +259,7 @@ const buildPinionGroup = (
     replicad
   );
   const shaft = buildShaftSolid(gearInput.bore1, gearInput.shaftL1, gearInput.keyway1, replicad);
-  const group = shaft ? fuseToSingleBody(gear, shaft) : gear;
+  const group = shaft ? fuseToSingleBody(gear, shaft, replicad) : gear;
   if (shareProgress) progress(requestId, 'solid', 1, 1);
   return group;
 };
@@ -272,7 +299,7 @@ const buildGearGroup = (
     replicad
   );
   const shaft = buildShaftSolid(gearInput.bore2, gearInput.shaftL2, gearInput.keyway2, replicad);
-  const group = shaft ? fuseToSingleBody(gear, shaft) : gear;
+  const group = shaft ? fuseToSingleBody(gear, shaft, replicad) : gear;
   if (shareProgress) progress(requestId, 'solid', 1, 1);
   return group;
 };
